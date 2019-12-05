@@ -1,3 +1,7 @@
+using CuArrays
+using CUDAnative
+CuArrays.allowscalar(false)
+
 function axpy!(z, α, x, y)
   @inbounds for k = 1:length(x)
     z[k] = α * x[k] + y[k]
@@ -15,6 +19,17 @@ function psuedo_knl_axpy!(z, α, x, y, nthreads, nblocks)
   end
 end
 
+function knl_axpy!(z, α, x, y)
+  N = length(x)
+
+  nblocks = blockDim().x
+  bid = blockIdx().x
+  tid = threadIdx().x
+
+  k = tid + (bid - 1) * nblocks
+  @inbounds k < N && (z[k] = α * x[k] + y[k])
+end
+
 let
   N = 10000
   α = rand()
@@ -29,4 +44,10 @@ let
   nthreads = 256
   nblocks = fld1(N, nthreads)
   psuedo_knl_axpy!(h_z, α, h_x, h_y, nthreads, nblocks)
+
+  d_x = CuArray(h_x)
+  d_y = CuArray(h_y)
+  d_z = similar(d_x)
+  @cuda threads=nthreads blocks=nblocks knl_axpy!(h_z, α, h_x, h_y)
+
 end
