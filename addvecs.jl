@@ -3,6 +3,7 @@ using CUDAnative
 CuArrays.allowscalar(false)
 using LinearAlgebra
 using BenchmarkTools
+using GPUifyLoops
 
 function axpy!(z, α, x, y)
   @inbounds for k = 1:length(x)
@@ -33,6 +34,16 @@ function knl_axpy!(z, α, x, y)
   nothing
 end
 
+function gpuify_axpy!(z, α, x, y, nblocks, nthreads)
+  N = length(x)
+  @inbounds @loop for boff in (0; (blockIdx().x-1) * blockDim().x)
+    @loop for tid in (1:N; threadIdx().x)
+      k = tid + boff
+      k <= N && (z[k] = α * x[k] + y[k])
+    end
+  end
+end
+
 let
   N = 100000000
   α = rand()
@@ -41,21 +52,48 @@ let
   h_z = similar(h_x)
 
 
-  display(@benchmark $h_z .= $α .* $h_x .+ $h_y)
-  display(@benchmark axpy!($h_z, $α, $h_x, $h_y))
+  h_z .= α .* h_x .+ h_y
+  axpy!(h_z, α, h_x, h_y)
   @assert h_z == α * h_x + h_y
+
+  println("broadcasted")
+  display(@benchmark $h_z .= $α .* $h_x .+ $h_y)
+  println("axpy")
+  display(@benchmark axpy!($h_z, $α, $h_x, $h_y))
 
   h_z .= 0
   nthreads = 256
   nblocks = fld1(N, nthreads)
-  display(@benchmark psuedo_knl_axpy!($h_z, $α, $h_x, $h_y, $nthreads, $nblocks))
+  psuedo_knl_axpy!(h_z, α, h_x, h_y, nthreads, nblocks)
   @assert h_z == α * h_x + h_y
 
+  println("psuedo_knl_axpy!")
+  display(@benchmark psuedo_knl_axpy!($h_z, $α, $h_x, $h_y, $nthreads, $nblocks))
+
+  h_z .= 0
+  nthreads = 256
+  nblocks = fld1(N, nthreads)
+  @launch CPU() threads=nthreads blocks=nblocks gpuify_axpy!(h_z, α, h_x, h_y)
+  @assert h_z == α * h_x + h_y
+
+  println("gpuify (CPU)")
+  display(@benchmark @launch CPU() threads=$nthreads blocks=$nblocks gpuify_axpy!($h_z, $α, $h_x, $h_y))
+
+  #=
   d_x = CuArray(h_x)
   d_y = CuArray(h_y)
   d_z = similar(d_x)
   display(@benchmark CuArrays.@sync @cuda threads=$nthreads blocks=$nblocks knl_axpy!($d_z, $α, $d_x, $d_y))
-  # CuArrays.@sync @cuda threads=nthreads blocks=nblocks knl_axpy!(d_z, α, d_x, d_y)
-
   @assert isapprox(Array(d_z), α * h_x + h_y, norm=(x)->norm(x, Inf))
+
+
+  d_z .= 0
+  nthreads = 256
+  nblocks = fld1(N, nthreads)
+  @launch CPU() threads=nthreads blocks=nblocks gpuify_axpy!(d_z, α, d_x, d_y)
+  @assert isapprox(Array(d_z), α * h_x + h_y, norm=(x)->norm(x, Inf))
+
+  println("gpuify (GPU)")
+  display(@benchmark @launch CPU() threads=$nthreads blocks=$nblocks gpuify_axpy!($d_z, $α, $d_x, $d_y))
+  =#
 end
